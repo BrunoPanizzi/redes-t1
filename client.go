@@ -12,7 +12,7 @@ func talk(conn net.Conn) {
     }()
 
     fmt.Printf("[%s] Connected to server\n", conn.RemoteAddr())
-    written, err := conn.Write([]byte("PRBP PUT 12303241 heloworld.txt askdfhlsehf")) 
+    written, err := conn.Write([]byte("PRBP PUT 128\n0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")) 
 
     if err != nil {
         fmt.Printf("[%s] Error writing to server: %v\n", conn.RemoteAddr(), err)

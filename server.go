@@ -3,6 +3,9 @@ package main
 import (
     "fmt"
     "net"
+    "bufio"
+    "strings"
+    "strconv"
 )
 
 // <protocol> <metodo> [payload_size]\n
@@ -23,6 +26,84 @@ import (
 // servidor -> PRBP QUIT\n
 
 
+type Method int
+
+const (
+    LIST Method = iota
+    PUT
+    QUIT
+)
+
+type CommandType int
+
+const (
+    REQUEST CommandType = iota
+    RESPONSE
+)
+
+type Command struct {
+    Type        CommandType
+    Method      Method
+    PayloadSize int
+    Payload     []byte
+}
+
+func ParseMethod(s string) (Method, error) {
+    switch s {
+    case "LIST": return LIST, nil
+    case "PUT":  return PUT, nil
+    case "QUIT": return QUIT, nil
+    default:
+        return -1, fmt.Errorf("invalid method: %s", s)
+    }
+}
+
+func ParseHeader(data string, commandType CommandType) (*Command, error) {
+    parts := strings.SplitN(data, " ", 4)
+
+    if parts[0] != "PRBP" {
+        return nil, fmt.Errorf("invalid protocol")
+    }
+
+    method, err := ParseMethod(parts[1])
+
+    if err != nil {
+        return nil, err
+    }
+
+    var payloadSize int
+
+    if len(parts) > 2 {
+        payloadSize, err = strconv.Atoi(parts[2])
+        if err != nil {
+            return nil, err
+        }
+    }
+
+    cmd := &Command{
+        Type:        commandType,
+        Method:      method,
+        PayloadSize: payloadSize,
+        Payload:     make([]byte, payloadSize),
+    }
+
+    return cmd, nil
+}
+
+func (c *Command) String() string {
+    return fmt.Sprintf("Type: %v, Method: %v, PayloadSize: %d, Payload: %s{}",
+        c.Type, c.Method, c.PayloadSize, string(c.Payload))
+}
+
+func handleCommand(command *Command, conn net.Conn) {
+    // fazer coisas aqui
+    // switch command.Method {
+    //   case PUT:  handlePut(command, conn)
+    //   case LIST: handleList(command, conn)
+    //   case QUIT: handleQuit(command, conn)
+    // }
+}
+
 func handleConnection(conn net.Conn) {
     defer func() {
         conn.Close()
@@ -30,29 +111,35 @@ func handleConnection(conn net.Conn) {
     }()
     fmt.Printf("[%s] Client connected\n", conn.RemoteAddr())
 
-    buffer := make([]byte, 32)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		fmt.Printf("[%s] Error reading from client: %v\n", conn.RemoteAddr(), err)
-		return
-	}
-
-	buffer = make([]byte, 1024)
-
-    for {
-        n, err := conn.Read(buffer)
-        if err != nil {
-            fmt.Printf("[%s] Error reading from client: %v\n", conn.RemoteAddr(), err)
-            break
-        }
-        fmt.Printf("[%s] Received from client: %s\n", conn.RemoteAddr(), string(buffer[:n]))
-        n, err = conn.Write([]byte(fmt.Sprintf("Read your message: %s", string(buffer[:n]))))
-        if err != nil {
-            fmt.Printf("[%s] Error writing to client: %v\n", conn.RemoteAddr(), err)
-            break
-        }
-        fmt.Printf("[%s] Wrote %d bytes to client\n", conn.RemoteAddr(), n)
+    // reads untill the first \n (the whole header)
+    reader := bufio.NewReader(conn)
+    header, err := reader.ReadBytes('\n')
+    if err != nil {
+        fmt.Printf("[%s] Could not read request header: %v\n", conn.RemoteAddr(), err)
+        return
     }
+
+    command, err := ParseHeader(string(header[:len(header)-1]), REQUEST)
+
+    if err != nil {
+        fmt.Printf("[%s] Could not parse header: %v\n", conn.RemoteAddr(), err)
+        return
+    }
+
+    fmt.Printf("[%s] Command received: %v\n", conn.RemoteAddr(), command.String())
+    fmt.Printf("[%s] Attempting to read %d bytes from payload\n", conn.RemoteAddr(), len(command.Payload))
+
+    n, err := reader.Read(command.Payload)
+    if err != nil {
+        fmt.Printf("[%s] Could not read payload: %v\n", conn.RemoteAddr(), err)
+        return
+    }
+
+    fmt.Printf("Read %d bytes from payload!\n%s\n", n, string(command.Payload[:n]))
+
+    handleCommand(command, conn)
+
+    conn.Write([]byte("Received your message!"))
 }
 
 func main() {
