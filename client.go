@@ -12,7 +12,14 @@ func talk(conn net.Conn) {
 	}()
 
 	fmt.Printf("[%s] Connected to server\n", conn.RemoteAddr())
-	written, err := conn.Write([]byte("PRBP LIST 128\n0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"))
+
+	// now the protocol have this format: PRBP <METHOD> <PAYLOAD_SIZE>\n<FILENAME>\n<PAYLOAD>
+	// Example: PRBP PUT 23\nhello.txt\nHello world!!!
+	// Send a PUT command to the server
+	// Here we are sending a file named "hello.txt" with the content "Hello world!!!"
+	// I've implemented this way cause we needed a division to know which name the file will have.
+	// The number of bytes is 23 because "hello.txt\nHello world!!!" has 23 bytes
+	written, err := conn.Write([]byte("PRBP PUT 23\nhello.txt\nHello world!!!"))
 
 	if err != nil {
 		fmt.Printf("[%s] Error writing to server: %v\n", conn.RemoteAddr(), err)

@@ -118,9 +118,45 @@ func handleList(conn net.Conn) {
 	conn.Write([]byte(response))
 }
 
-func handlePut(conn net.Conn) {
-	// implementar
-	print("PUT command received\n")
+func handlePut(command *Command, conn net.Conn) {
+	// payload = "<filename>\n<conteúdo>"
+	parts := strings.SplitN(string(command.Payload), "\n", 2)
+	if len(parts) < 2 {
+		response := "PRBP PUT 5\nnot enough arguments"
+		conn.Write([]byte(response))
+		return
+	}
+
+	filename := strings.TrimSpace(parts[0])
+	content := []byte(parts[1])
+	filepath := storageDir + "/" + filename
+
+	// Verificar se já existe
+	if _, err := os.Stat(filepath); err == nil {
+		response := "PRBP PUT 5\nfile already exists"
+		conn.Write([]byte(response))
+		return
+	}
+
+	// Criar e gravar no arquivo
+	f, err := os.Create(filepath)
+	if err != nil {
+		response := "PRBP PUT 5\nerror creating file"
+		conn.Write([]byte(response))
+		return
+	}
+	defer f.Close()
+
+	_, err = f.Write(content)
+	if err != nil {
+		response := "PRBP PUT 5\nerror writing to file"
+		conn.Write([]byte(response))
+		return
+	}
+
+	print("File saved: " + filepath + "\n")
+	response := "PRBP PUT 2\nOK"
+	conn.Write([]byte(response))
 }
 
 func handleQuit(conn net.Conn) {
@@ -132,7 +168,7 @@ func handleCommand(command *Command, conn net.Conn) {
 	// fazer coisas aqui
 	switch command.Method {
 	case PUT:
-		handlePut(conn)
+		handlePut(command, conn)
 	case LIST:
 		handleList(conn)
 	case QUIT:
