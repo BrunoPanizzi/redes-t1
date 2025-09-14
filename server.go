@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -46,6 +47,71 @@ type Command struct {
 	Method      Method
 	PayloadSize int
 	Payload     []byte
+}
+
+func serverHandleList(conn net.Conn) {
+	files, err := os.ReadDir(storageDir)
+	if err != nil {
+		fmt.Printf("Error reading storage directory: %v\n", err)
+		conn.Write([]byte("PRBP LIST 0\n"))
+		return
+	}
+
+	var builder strings.Builder
+	for _, file := range files {
+		if !file.IsDir() {
+			builder.WriteString(file.Name() + "\n")
+		}
+	}
+
+	payload := builder.String()
+	response := fmt.Sprintf("PRBP LIST %d\n%s", len(payload), payload)
+	conn.Write([]byte(response))
+}
+
+func serverHandlePut(command *Command, conn net.Conn) {
+	if len(command.Payload) == 0 {
+		response := "PRBP PUT 19\nError: No payload"
+		conn.Write([]byte(response))
+		return
+	}
+
+	parts := strings.SplitN(string(command.Payload), "\n", 2)
+	if len(parts) < 2 {
+		response := "PRBP PUT 26\nError: Invalid payload format"
+		conn.Write([]byte(response))
+		return
+	}
+
+	filename := strings.TrimSpace(parts[0])
+	content := []byte(parts[1])
+	filepath := storageDir + filename
+
+	f, err := os.Create(filepath) // cria ou sobrescreve
+	if err != nil {
+		response := "PRBP PUT 24\nError: Creating file"
+		conn.Write([]byte(response))
+		return
+	}
+	defer f.Close()
+
+	_, err = f.Write(content)
+	if err != nil {
+		response := "PRBP PUT 24\nError: Writing file"
+		conn.Write([]byte(response))
+		return
+	}
+
+	fmt.Printf("File saved (overwritten if existed): %s (%d bytes)\n", filepath, len(content))
+	response := "PRBP PUT 2\nOK"
+	conn.Write([]byte(response))
+}
+
+func serverHandleQuit(conn net.Conn) {
+	response := "PRBP QUIT 0\n"
+	conn.Write([]byte(response))
+	conn.Close()
+	fmt.Printf("[%s] Client disconnected via QUIT\n", conn.RemoteAddr())
 }
 
 func ParseMethod(s string) (Method, error) {
@@ -98,81 +164,14 @@ func (c *Command) String() string {
 		c.Type, c.Method, c.PayloadSize, string(c.Payload))
 }
 
-func handleList(conn net.Conn) {
-	files, err := os.ReadDir(storageDir)
-	if err != nil {
-		fmt.Printf("Error reading storage directory: %v\n", err)
-		conn.Write([]byte("PRBP LIST 0\n"))
-		return
-	}
-
-	var builder strings.Builder
-	for _, file := range files {
-		if !file.IsDir() {
-			builder.WriteString(file.Name() + "\n")
-		}
-	}
-
-	payload := builder.String()
-	response := fmt.Sprintf("PRBP LIST %d\n%s", len(payload), payload)
-	conn.Write([]byte(response))
-}
-
-func handlePut(command *Command, conn net.Conn) {
-	// payload = "<filename>\n<conteúdo>"
-	parts := strings.SplitN(string(command.Payload), "\n", 2)
-	if len(parts) < 2 {
-		response := "PRBP PUT 5\nnot enough arguments"
-		conn.Write([]byte(response))
-		return
-	}
-
-	filename := strings.TrimSpace(parts[0])
-	content := []byte(parts[1])
-	filepath := storageDir + "/" + filename
-
-	// Verificar se já existe
-	if _, err := os.Stat(filepath); err == nil {
-		response := "PRBP PUT 5\nfile already exists"
-		conn.Write([]byte(response))
-		return
-	}
-
-	// Criar e gravar no arquivo
-	f, err := os.Create(filepath)
-	if err != nil {
-		response := "PRBP PUT 5\nerror creating file"
-		conn.Write([]byte(response))
-		return
-	}
-	defer f.Close()
-
-	_, err = f.Write(content)
-	if err != nil {
-		response := "PRBP PUT 5\nerror writing to file"
-		conn.Write([]byte(response))
-		return
-	}
-
-	print("File saved: " + filepath + "\n")
-	response := "PRBP PUT 2\nOK"
-	conn.Write([]byte(response))
-}
-
-func handleQuit(conn net.Conn) {
-	conn.Write([]byte("PRBP QUIT 0\n"))
-	conn.Close()
-}
-
 func handleCommand(command *Command, conn net.Conn) {
-	// fazer coisas aqui
 	switch command.Method {
 	case PUT:
-		handlePut(command, conn)
+		serverHandlePut(command, conn)
 	case LIST:
-		handleList(conn)
+		serverHandleList(conn)
 	case QUIT:
-		handleQuit(conn)
+		serverHandleQuit(conn)
 	default:
 		fmt.Printf("Unknown method: %v\n", command.Method)
 	}
@@ -185,49 +184,56 @@ func handleConnection(conn net.Conn) {
 	}()
 	fmt.Printf("[%s] Client connected\n", conn.RemoteAddr())
 
-	// reads untill the first \n (the whole header)
 	reader := bufio.NewReader(conn)
-	header, err := reader.ReadBytes('\n')
-	if err != nil {
-		fmt.Printf("[%s] Could not read request header: %v\n", conn.RemoteAddr(), err)
-		return
+
+	for {
+		header, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err != io.EOF {
+				fmt.Printf("[%s] Error reading header: %v\n", conn.RemoteAddr(), err)
+			}
+			return
+		}
+
+		command, err := ParseHeader(string(header[:len(header)-1]), REQUEST)
+		if err != nil {
+			fmt.Printf("[%s] Could not parse header: %v\n", conn.RemoteAddr(), err)
+			return
+		}
+
+		if command.PayloadSize > 0 {
+			_, err := io.ReadFull(reader, command.Payload)
+			if err != nil {
+				fmt.Printf("[%s] Could not read payload: %v\n", conn.RemoteAddr(), err)
+				return
+			}
+		}
+
+		fmt.Printf("[%s] Command received: %v\n", conn.RemoteAddr(), command.String())
+		handleCommand(command, conn)
+
+		if command.Method == QUIT {
+			return
+		}
 	}
-
-	command, err := ParseHeader(string(header[:len(header)-1]), REQUEST)
-
-	if err != nil {
-		fmt.Printf("[%s] Could not parse header: %v\n", conn.RemoteAddr(), err)
-		return
-	}
-
-	fmt.Printf("[%s] Command received: %v\n", conn.RemoteAddr(), command.String())
-	fmt.Printf("[%s] Attempting to read %d bytes from payload\n", conn.RemoteAddr(), len(command.Payload))
-
-	n, err := reader.Read(command.Payload)
-	if err != nil {
-		fmt.Printf("[%s] Could not read payload: %v\n", conn.RemoteAddr(), err)
-		return
-	}
-
-	fmt.Printf("Read %d bytes from payload!\n%s\n", n, string(command.Payload[:n]))
-
-	handleCommand(command, conn)
-
-	conn.Write([]byte("Received your message!"))
 }
 
 func main() {
-	fmt.Println("Starting the tcp server on the port 8080")
-	ln, err := net.Listen("tcp", ":8080")
-	if err != nil {
-		fmt.Println("Error starting server:", err)
-		return
-	}
+	fmt.Println("Starting TCP server on port 8080")
 
 	if err := os.MkdirAll(storageDir, 0755); err != nil {
 		fmt.Println("Error creating storage directory:", err)
 		return
 	}
+
+	ln, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		fmt.Println("Error starting server:", err)
+		return
+	}
+	defer ln.Close()
+
+	fmt.Println("Server listening on port 8080")
 
 	for {
 		conn, err := ln.Accept()
