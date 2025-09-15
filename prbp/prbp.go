@@ -67,7 +67,6 @@ func ParseMethod(s string) (Method, error) {
 }
 
 func ParseCommand(r io.Reader, t CommandType) (*Command, error) {
-	fmt.Printf("Parsing command of type %v\n", t)
 	reader := bufio.NewReader(r)
 
 	header, err := reader.ReadBytes('\n')
@@ -76,7 +75,6 @@ func ParseCommand(r io.Reader, t CommandType) (*Command, error) {
 	}
 
 	parts := strings.SplitN(string(header), " ", 4)
-	fmt.Printf("Header parts: %v\n", parts)
 
 	if parts[0] != "PRBP" {
 		return nil, fmt.Errorf("invalid protocol")
