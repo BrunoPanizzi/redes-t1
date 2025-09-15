@@ -3,20 +3,22 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/BrunoPanizzi/redes_t1/prbp"
 )
 
 type Metrics struct {
-	StartTime     time.Time
-	EndTime       time.Time
-	BytesSent     int
-	BytesReceived int
+	StartTime        time.Time
+	EndTime          time.Time
+	TransmittingTime time.Duration
+	BytesSent        int
+	BytesReceived    int
 }
 
 const storage = "client_storage/"
@@ -39,43 +41,75 @@ func parseServerResponse(header string) (method string, payloadSize int, err err
 	return method, payloadSize, nil
 }
 
-func handleList(conn net.Conn, metrics *Metrics) {
-	msg := "PRBP LIST\n"
-	n, err := conn.Write([]byte(msg))
-	if err != nil {
-		fmt.Println("Error sending LIST command:", err)
-		return
-	}
-	metrics.BytesSent += n
+func timeIt(f func()) time.Duration {
+	start := time.Now()
+	f()
+	return time.Since(start)
+}
 
-	reader := bufio.NewReader(conn)
-	header, err := reader.ReadString('\n')
+// Human-readable byte formatting helpers
+func humanBytes(n int64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB", "EB"}
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	d := float64(n)
+	i := 0
+	for d >= 1024 && i < len(units)-1 {
+		d /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.2f %s", d, units[i])
+}
+
+func humanBytesF(n float64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB", "EB"}
+	if n < 1024 {
+		return fmt.Sprintf("%.0f B", n)
+	}
+	d := n
+	i := 0
+	for d >= 1024 && i < len(units)-1 {
+		d /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.2f %s", d, units[i])
+}
+
+func handleList(conn net.Conn, metrics *Metrics) {
+	request := prbp.NewCommand(prbp.REQUEST, prbp.LIST)
+
+	sendDuration := timeIt(func() {
+		n, err := conn.Write(request.Bytes())
+		if err != nil {
+			fmt.Println("Error sending LIST command:", err)
+			return
+		}
+		metrics.BytesSent += n
+	})
+	metrics.TransmittingTime += sendDuration
+
+	var response *prbp.Command
+	var err error
+	parseDuration := timeIt(func() {
+		response, err = prbp.ParseCommand(conn, prbp.RESPONSE)
+	})
+	metrics.TransmittingTime += parseDuration
+
 	if err != nil {
 		fmt.Println("Error reading response:", err)
 		return
 	}
-	metrics.BytesReceived += len(header)
 
-	method, payloadSize, err := parseServerResponse(header)
-	if err != nil {
-		fmt.Println("Error parsing response:", err)
+	metrics.BytesReceived += len(response.Bytes())
+
+	if response.Method != prbp.LIST {
+		fmt.Printf("Unexpected response method: %s (expected LIST)\n", response.Method.String())
 		return
 	}
 
-	if method != "LIST" {
-		fmt.Printf("Unexpected response method: %s (expected LIST)\n", method)
-		return
-	}
-
-	if payloadSize > 0 {
-		payload := make([]byte, payloadSize)
-		n, err := io.ReadFull(reader, payload)
-		if err != nil {
-			fmt.Println("Error reading response payload:", err)
-			return
-		}
-		metrics.BytesReceived += n
-		fmt.Printf("Files on server:\n%s", string(payload))
+	if response.PayloadSize > 0 {
+		fmt.Printf("Files on server:\n%s", string(response.Payload))
 	} else {
 		fmt.Println("No files found on server.")
 	}
@@ -90,62 +124,69 @@ func handlePut(conn net.Conn, filename string, metrics *Metrics) {
 	}
 
 	payload := fmt.Sprintf("%s\n%s", filepath.Base(filename), string(content))
-	header := fmt.Sprintf("PRBP PUT %d\n", len(payload))
+	request := prbp.NewCommand(prbp.REQUEST, prbp.PUT).SetPayload([]byte(payload))
 
-	completeMessage := header + payload
-	n, err := conn.Write([]byte(completeMessage))
-	if err != nil {
-		fmt.Println("Error sending PUT command:", err)
-		return
-	}
-	metrics.BytesSent += n
+	sendDuration := timeIt(func() {
+		n, err := conn.Write(request.Bytes())
+		if err != nil {
+			fmt.Println("Error sending PUT command:", err)
+			return
+		}
+		metrics.BytesSent += n
+	})
+	metrics.TransmittingTime += sendDuration
 
-	reader := bufio.NewReader(conn)
-	responseHeader, err := reader.ReadString('\n')
+	var response *prbp.Command
+	parseDuration := timeIt(func() {
+		response, err = prbp.ParseCommand(conn, prbp.RESPONSE)
+	})
+	metrics.TransmittingTime += parseDuration
+
 	if err != nil {
 		fmt.Println("Error reading response:", err)
 		return
 	}
-	metrics.BytesReceived += len(responseHeader)
+	metrics.BytesReceived += len(response.Bytes())
 
-	method, payloadSize, err := parseServerResponse(responseHeader)
-	if err != nil {
-		fmt.Println("Error parsing response:", err)
+	if response.Method != prbp.PUT {
+		fmt.Printf("Unexpected response method: %s (expected PUT)\n", response.Method.String())
 		return
 	}
 
-	if method != "PUT" {
-		fmt.Printf("Unexpected response method: %s (expected PUT)\n", method)
-		return
-	}
-
-	if payloadSize > 0 {
-		responsePayload := make([]byte, payloadSize)
-		n, err := io.ReadFull(reader, responsePayload)
-		if err != nil {
-			fmt.Println("Error reading response payload:", err)
-			return
-		}
-		metrics.BytesReceived += n
-		fmt.Printf("Server response: %s\n", string(responsePayload))
+	if response.PayloadSize > 0 {
+		fmt.Printf("Server response: %s\n", string(response.Payload))
 	}
 }
 
 func handleQuit(conn net.Conn, metrics *Metrics) {
-	msg := "PRBP QUIT\n"
-	n, err := conn.Write([]byte(msg))
-	if err != nil {
-		fmt.Println("Error sending QUIT command:", err)
-		return
-	}
-	metrics.BytesSent += n
+	request := prbp.NewCommand(prbp.REQUEST, prbp.QUIT)
 
-	// Ler resposta do servidor (opcional)
-	reader := bufio.NewReader(conn)
-	response, err := reader.ReadString('\n')
+	sendDuration := timeIt(func() {
+		n, err := conn.Write(request.Bytes())
+		if err != nil {
+			fmt.Println("Error sending QUIT command:", err)
+			return
+		}
+		metrics.BytesSent += n
+	})
+	metrics.TransmittingTime += sendDuration
+
+	var response *prbp.Command
+	var err error
+	parseDuration := timeIt(func() {
+		response, err = prbp.ParseCommand(conn, prbp.RESPONSE)
+	})
+	metrics.TransmittingTime += parseDuration
+
 	if err == nil {
-		fmt.Println("Server response:", strings.TrimSpace(response))
-		metrics.BytesReceived += len(response)
+		metrics.BytesReceived += len(response.Bytes())
+		if response.PayloadSize > 0 {
+			fmt.Println("Server response:", strings.TrimSpace(string(response.Payload)))
+		} else {
+			fmt.Println("Server response:", response.Method.String())
+		}
+	} else {
+		fmt.Println("Error reading response:", err)
 	}
 
 	conn.Close()
@@ -159,14 +200,14 @@ func main() {
 		return
 	}
 
+	host := os.Args[1]
+	port := os.Args[2]
+	address := fmt.Sprintf("%s:%s", host, port)
+
 	if err := os.MkdirAll(storage, 0755); err != nil {
 		fmt.Println("Error creating client storage directory:", err)
 		return
 	}
-
-	host := os.Args[1]
-	port := os.Args[2]
-	address := fmt.Sprintf("%s:%s", host, port)
 
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
@@ -178,13 +219,17 @@ func main() {
 	metrics := Metrics{StartTime: time.Now()}
 	defer func() {
 		metrics.EndTime = time.Now()
-		duration := metrics.EndTime.Sub(metrics.StartTime).Seconds()
+		dur := metrics.EndTime.Sub(metrics.StartTime).Seconds()
 		fmt.Printf("\nSession Metrics:\n")
-		fmt.Printf("Duration: %.2f seconds\n", duration)
-		fmt.Printf("Bytes Sent: %d bytes\n", metrics.BytesSent)
-		fmt.Printf("Bytes Received: %d bytes\n", metrics.BytesReceived)
-		if duration > 0 {
-			fmt.Printf("Throughput: %.2f bytes/sec\n", float64(metrics.BytesSent)/duration)
+		fmt.Printf("Start Time: %s\n", metrics.StartTime.Format(time.DateTime))
+		fmt.Printf("End Time: %s\n", metrics.EndTime.Format(time.DateTime))
+		fmt.Printf("Duration: %.2f seconds\n", dur)
+		fmt.Printf("Bytes Sent: %s\n", humanBytes(int64(metrics.BytesSent)))
+		fmt.Printf("Bytes Received: %s\n", humanBytes(int64(metrics.BytesReceived)))
+		txSec := metrics.TransmittingTime.Seconds()
+		if txSec > 0 {
+			rate := float64(metrics.BytesSent+metrics.BytesReceived) / txSec
+			fmt.Printf("Throughput: %s/s\n", humanBytesF(rate))
 		}
 	}()
 
